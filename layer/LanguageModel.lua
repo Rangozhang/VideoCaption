@@ -18,6 +18,7 @@ function layer:__init(opt)
   self.word_input_layer = utils.getopt(opt, 'word_input_layer')
   self.rnn_size = utils.getopt(opt, 'rnn_size')
   self.num_layers = utils.getopt(opt, 'num_layers', 1)
+  self.frame_length = utils.getopt(opt, 'frame_length', 10)
   local dropout = utils.getopt(opt, 'dropout', 0)
   -- options for Language Model
   self.seq_length = utils.getopt(opt, 'seq_length') -- WHAT IS THIS???
@@ -49,7 +50,7 @@ function layer:createClones()
   print('constructing clones inside the LanguageModel')
   self.clones = {self.core}
   self.lookup_tables = {self.lookup_table}
-  for t=2,self.seq_length+2 do
+  for t=2,self.seq_length+self.frame_length do
     self.clones[t] = self.core:clone('weight', 'bias', 'gradWeight', 'gradBias')
     self.lookup_tables[t] = self.lookup_table:clone('weight', 'gradWeight')
   end
@@ -104,7 +105,7 @@ Careful: make sure model is in :evaluate() mode if you're calling this.
 Returns: a DxN LongTensor with integer elements 1..M, 
 where D is sequence (ground truth sentence) length and N is batch (so columns are sequences)
 --]]
--- imgs: Tensor(frame_size * batch_size * image_dimension)
+-- imgs: Tensor(self.frame_length * batch_size * feature_dimension)
 function layer:sample(imgs, opt)
   local sample_max = utils.getopt(opt, 'sample_max', 1)
   local beam_size = utils.getopt(opt, 'beam_size', 1)
@@ -119,14 +120,14 @@ function layer:sample(imgs, opt)
   local seq = torch.LongTensor(self.seq_length, batch_size):zero()
   local seqLogprobs = torch.FloatTensor(self.seq_length, batch_size)
   local logprobs -- logprobs predicted in last time step
-  for t=1,self.seq_length+1+opt.frame_length do
+  for t=1,self.seq_length+1+self.frame_length do
 
     local wt, iwt, imt, sampleLogprobs
-    if t <= opt.frame_length then
+    if t <= self.frame_length then
       -- feed in the images
       imt = imgs[t]
       wt = torch.zeros(batch_size, opt.input_word_encoding_size)
-    elseif t == opt.frame_length + 1 then
+    elseif t == self.frame_length + 1 then
       -- feed in the start tokens
       iwt = torch.LongTensor(batch_size):fill(self.vocab_size+1)
       wt = self.lookup_table:forward(iwt)
@@ -154,14 +155,15 @@ function layer:sample(imgs, opt)
       wt = self.lookup_table:forward(iwt)
     end
 
-    if t >= opt.frame_length + 2 then 
-      seq[t-opt.frame_length-1] = iwt -- record the samples
-      seqLogprobs[t-opt.frame_length-1] = sampleLogprobs:view(-1):float() -- and also their log likelihoods
+    if t >= self.frame_length + 2 then 
+      seq[t-self.frame_length-1] = iwt -- record the samples
+      seqLogprobs[t-self.frame_length-1] = sampleLogprobs:view(-1):float() -- and also their log likelihoods
     end
 
     assert(wt:size(2) == self.input_word_encoding_size, 'word_input:size(2) == self.input_word_encoding_size')
     local inputs = {imt, unpack(state), wt}
     local out = self.core:forward(inputs)
+    assert(self.num_state+1 == #out, 'self.num_state+1 == #out')
     logprobs = out[self.num_state+1] -- last element is the output vector
     state = {}
     for i=1,self.num_state do table.insert(state, out[i]) end
@@ -179,16 +181,16 @@ improve performance, so I am declaring this correct.
 ]]--
 function layer:sample_beam(imgs, opt)
   local beam_size = utils.getopt(opt, 'beam_size', 10)
-  local batch_size, feat_dim = imgs:size(1), imgs:size(2)
+  local batch_size, feat_dim = imgs:size(2), imgs:size(3)
   local function compare(a,b) return a.p > b.p end -- used downstream
 
   assert(beam_size <= self.vocab_size+1, 'lets assume this for now, otherwise this corner case causes a few headaches down the road. can be dealt with in future if needed')
 
   local seq = torch.LongTensor(self.seq_length, batch_size):zero()
   local seqLogprobs = torch.FloatTensor(self.seq_length, batch_size)
+
   -- lets process every image independently for now, for simplicity
   for k=1,batch_size do
-
     -- create initial states for all beams
     self:_createInitState(beam_size)
     local state = self.init_state
@@ -199,18 +201,21 @@ function layer:sample_beam(imgs, opt)
     local beam_logprobs_sum = torch.zeros(beam_size) -- running sum of logprobs for each beam
     local logprobs -- logprobs predicted in last time step, shape (beam_size, vocab_size+1)
     local done_beams = {}
-    for t=1,self.seq_length+2 do
+    for t=1,self.seq_length+self.frame_length do
 
-      local xt, it, sampleLogprobs
+      local wt, iwt, imt, sampleLogprobs
       local new_state
-      if t == 1 then
+      if t <= self.frame_length then
         -- feed in the images
-        local imgk = imgs[{ {k,k} }]:expand(beam_size, feat_dim) -- k'th image feature expanded out
-        xt = imgk
-      elseif t == 2 then
+	imt = imgs[t][k]:expand(beam_size, feat_dim) -- k'th image in the batch
+	wt = torch.zeros(beam_size, self.input_word_encoding_size)
+        --local imgk = imgs[{ {k,k} }]:expand(beam_size, feat_dim) -- k'th image feature expanded out
+        --xt = imgk
+      elseif t == self.frame_length+1 then
         -- feed in the start tokens
-        it = torch.LongTensor(beam_size):fill(self.vocab_size+1)
-        xt = self.lookup_table:forward(it)
+        iwt = torch.LongTensor(beam_size):fill(self.vocab_size+1)
+        wt = self.lookup_table:forward(iwt)
+	imt = torch.zeros(beam_size, feat_dim)
       else
         --[[
           perform a beam merge. that is,
@@ -270,13 +275,14 @@ function layer:sample_beam(imgs, opt)
         end
         
         -- encode as vectors
-        it = beam_seq[t-2]
-        xt = self.lookup_table:forward(it)
+        iwt = beam_seq[t-2]
+        wt = self.lookup_table:forward(iwt)
+	imt = torch.zeros(beam_size, feat_dim)
       end
 
       if new_state then state = new_state end -- swap rnn state, if we reassinged beams
 
-      local inputs = {xt,unpack(state)}
+      local inputs = {imt,unpack(state), wt}
       local out = self.core:forward(inputs)
       logprobs = out[self.num_state+1] -- last element is the output vector
       state = {}
@@ -309,7 +315,7 @@ function layer:updateOutput(input)
 
   assert(seq:size(1) == self.seq_length)
   local batch_size = seq:size(2)
-  self.output:resize(self.seq_length+1+opt.frame_length, batch_size, self.vocab_size+1)
+  self.output:resize(self.seq_length+1+self.frame_length, batch_size, self.vocab_size+1)
   
   self:_createInitState(batch_size)
 
@@ -317,16 +323,16 @@ function layer:updateOutput(input)
   self.inputs = {}
   self.lookup_tables_inputs = {}
   self.tmax = 0 -- we will keep track of max sequence length encountered in the data for efficiency
-  for t=1,self.seq_length+1+opt.frame_length do
+  for t=1,self.seq_length+1+self.frame_length do
 
     local can_skip = false
     -- local xt
     local wt, iwt, imt
-    if t <= opt.frame_length then
+    if t <= self.frame_length then
       -- feed in the images
       imt = imgs[t] -- NxK sized input
       wt = torch.zeros(batch_size, opt.input_word_encoding_size)
-    elseif t == opt.frame_length + 1 then
+    elseif t == self.frame_length + 1 then
       -- feed in the start tokens
       local iwt = torch.LongTensor(batch_size):fill(self.vocab_size+1)
       self.lookup_tables_inputs[t] = iwt
@@ -335,7 +341,7 @@ function layer:updateOutput(input)
     else
       imt = torch.zeros(batch_size, opt.input_image_encoding_size)
       -- feed in the rest of the sequence...
-      local iwt = seq[t-opt.frame_length-1]:clone()
+      local iwt = seq[t-self.frame_length-1]:clone()
       if torch.sum(iwt) == 0 then
         -- computational shortcut for efficiency. All sequences have already terminated and only
         -- contain null tokens from here on. We can skip the rest of the forward pass and save time
@@ -429,10 +435,10 @@ the gradients are properly set to zeros where appropriate.
 --]]
 
 --[[RUI:
-input is a Tensor of size (D+1+opt.frame_length)xNx(M+1)
+input is a Tensor of size (D+1+self.frame_length)xNx(M+1)
 seq is a LongTensor of size DxN. The way we infer the target in this criterion is as follows:
-- at the first opt.frame_length time steps the output is ignored (loss = 0). It's the image sequence ticks
-- the label sequence "seq" is shifted by opt.frame_length to produce targets
+- at the first self.frame_length time steps the output is ignored (loss = 0). It's the image sequence ticks
+- the label sequence "seq" is shifted by self.frame_length to produce targets
 - at last time step the output is always the special END token (last dimension)
 The criterion must be able to accomodate variably-sized sequences by making sure
 the gradients are properly set to zeros where appropriate.
@@ -441,7 +447,7 @@ function crit:updateOutput(input, seq)
   self.gradInput:resizeAs(input):zero() -- reset to zeros
   local L, N, Mplus1 = input:size(1), input:size(2), input:size(3)
   local D = seq:size(1)
-  assert(D == L-1-opt.frame_length, 'input Tensor should be (1+opt.frame_length) larger in time')
+  assert(D == L-1-self.frame_length, 'input Tensor should be (1+self.frame_length) larger in time')
 
   local loss = 0
   local n = 0
@@ -449,13 +455,13 @@ function crit:updateOutput(input, seq)
   for b=1,N do -- iterate over batches
     local first_time = true
 
-    for t=opt.frame_length+1,L do -- iterate over sequence time (ignore t=1:opt.frame_legnth, dummy forward for the frames)
+    for t=self.frame_length+1,L do -- iterate over sequence time (ignore t=1:opt.frame_legnth, dummy forward for the frames)
       -- fetch the index of the next token in the sequence
       local target_index
-      if t-opt.frame_length > D then -- we are out of bounds of the index sequence: pad with null tokens
+      if t-self.frame_length > D then -- we are out of bounds of the index sequence: pad with null tokens
         target_index = 0
       else
-        target_index = seq[{t-opt.frame_length,b}] -- t-1 is correct, since at t=2 START token was fed in and we want to predict first word (and 2-1 = 1).
+        target_index = seq[{t-self.frame_length,b}] -- t-1 is correct, since at t=2 START token was fed in and we want to predict first word (and 2-1 = 1).
       end
       -- the first time we see null token as next index, actually want the model to predict the END token
       if target_index == 0 and first_time then
