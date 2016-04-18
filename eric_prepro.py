@@ -189,24 +189,35 @@ def main(params):
   f.create_dataset("label_start_ix", dtype='uint32', data=label_start_ix)
   f.create_dataset("label_end_ix", dtype='uint32', data=label_end_ix)
   f.create_dataset("label_length", dtype='uint32', data=label_length)
-  dset = f.create_dataset("images", (N,3,256,256), dtype='uint8') # space for resized images
+  dt = h5py.special_dtype(vlen=np.dtype('uint8'))
+  dset = f.create_dataset("images", (N,3,256,256, ), dtype=dt) # space for resized images
   for i,img in enumerate(imgs):
-    # load the image
-    I = imread(os.path.join(params['images_root'], img['file_path']))
-    try:
-        Ir = imresize(I, (256,256))
-    except:
-        print 'failed resizing image %s - see http://git.io/vBIE0' % (img['file_path'],)
-        raise
-    # handle grayscale input images
-    if len(Ir.shape) == 2:
-      Ir = Ir[:,:,np.newaxis]
-      Ir = np.concatenate((Ir,Ir,Ir), axis=2)
-    # and swap order of axes from (256,256,3) to (3,256,256)
-    Ir = Ir.transpose(2,0,1)
-    # write to h5
-    dset[i] = Ir
-    if i % 1000 == 0:
+    # load the image SSSSSSSSSSSS
+    DIR = os.path.join(params['images_root'], img['file_path']+'/')
+    print(img['file_path'].split('_'))
+    end_id = len([name for name in os.listdir(DIR) if os.path.isfile(os.path.join(DIR, name))])
+    print end_id
+    start_id = 1
+    holder_list = list()
+    for f_id in range(start_id, end_id):
+	tmp_file_name = "{}_{:06d}.jpg".format(img['file_path'], f_id+1)
+    	I = imread(os.path.join(params['images_root'], img['file_path']+'/'+ tmp_file_name))
+    	try:
+            Ir = imresize(I, (256,256))
+    	except:
+            print 'failed resizing image %s - see http://git.io/vBIE0' % (img['file_path'],)
+            raise
+    	# handle grayscale input images
+   	if len(Ir.shape) == 2:
+      	    Ir = Ir[:,:,np.newaxis]
+     	    Ir = np.concatenate((Ir,Ir,Ir), axis=2)
+   	# and swap order of axes from (256,256,3) to (3,256,256)
+   	Ir = Ir.transpose(2,0,1)
+	# write to h5 holder
+	holder_list.append(Ir)
+    #import pdb; pdb.set_trace()
+    dset[i] = np.stack(holder_list, axis = 3)	
+    if i % 10 == 0:
       print 'processing %d/%d (%.2f%% done)' % (i, N, i*100.0/N)
   f.close()
   print 'wrote ', params['output_h5']

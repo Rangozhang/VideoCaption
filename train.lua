@@ -29,7 +29,9 @@ cmd:option('-start_from', '', 'path to a model checkpoint to initialize model we
 
 -- Model settings
 cmd:option('-rnn_size',512,'size of the rnn in number of hidden nodes in each layer')
-cmd:option('-input_encoding_size',512,'the encoding size of each token in the vocabulary, and the image.')
+cmd:option('-input_image_encoding_size',512,'the encoding size of each frame of image.')
+cmd:option('-input_word_encoding_size',512,'the encoding size of each token in the vocabulary')
+cmd:option('-word_input_layer',2, 'before which layer of LSTMs do we input the word embedding?')
 
 -- Optimization: General
 cmd:option('-max_iters', -1, 'max number of iterations to run for (-1 = run forever)')
@@ -108,9 +110,11 @@ else
   -- intialize language model
   local lmOpt = {}
   lmOpt.vocab_size = loader:getVocabSize()
-  lmOpt.input_encoding_size = opt.input_encoding_size
+  lmOpt.input_image_encoding_size = opt.input_image_encoding_size
+  lmOpt.input_word_encoding_size = opt.input_word_encoding_size
   lmOpt.rnn_size = opt.rnn_size
-  lmOpt.num_layers = 1
+  lmOpt.num_layers = opt.num_layers
+  lmOpt.word_input_layer = opt.word_input_layer
   lmOpt.dropout = opt.drop_prob_lm
   lmOpt.seq_length = loader:getSeqLength()
   lmOpt.batch_size = opt.batch_size * opt.seq_per_img
@@ -239,7 +243,7 @@ local function lossFun()
   -- get batch of data  
   local data = loader:getBatch{batch_size = opt.batch_size, split = 'train', seq_per_img = opt.seq_per_img}
   data.images = net_utils.prepro(data.images, true, opt.gpuid >= 0) -- preprocess in place, do data augmentation
-  -- data.images: Nx3x224x224 
+  -- data.images: opt.frame_length*Nx3x224x224 
   -- data.seq: LxM where L is sequence length upper bound, and M = N*seq_per_img
 
   -- forward the ConvNet on images (most work happens here)

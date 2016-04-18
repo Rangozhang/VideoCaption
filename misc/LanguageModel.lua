@@ -1,7 +1,7 @@
 require 'nn'
 local utils = require 'misc.utils'
 local net_utils = require 'misc.net_utils'
-local LSTM = require 'misc.LSTM'
+local LSTM = require 'layer.LSTM'
 
 -------------------------------------------------------------------------------
 -- Language Model core
@@ -15,13 +15,14 @@ function layer:__init(opt)
   self.vocab_size = utils.getopt(opt, 'vocab_size') -- required
   self.input_word_encoding_size = utils.getopt(opt, 'input_word_encoding_size')
   self.input_image_encoding_size = utils.getopt(opt, 'input_image_encoding_size')
+  self.word_input_layer = utils.getopt(opt, 'word_input_layer')
   self.rnn_size = utils.getopt(opt, 'rnn_size')
   self.num_layers = utils.getopt(opt, 'num_layers', 1)
   local dropout = utils.getopt(opt, 'dropout', 0)
   -- options for Language Model
   self.seq_length = utils.getopt(opt, 'seq_length') -- WHAT IS THIS???
   -- create the core lstm network. note +1 for both the START and END tokens
-  self.core = LSTM.lstm(self.input_word_encoding_size, self.vocab_size + 1, self.rnn_size, self.num_layers, dropout)
+  self.core = LSTM.VC_lstm(self.input_word_encoding_size, self.vocab_size + 1, input_word_encoding_size, word_input_layer, self.rnn_size, self.num_layers, dropout)
   self.lookup_table = nn.LookupTable(self.vocab_size + 1, self.input_word_encoding_size) -- word to embedding???kil
   self:_createInitState(1) -- will be lazily resized later during forward passes
 end
@@ -291,10 +292,10 @@ function layer:sample_beam(imgs, opt)
   return seq, seqLogprobs
 end
 
---[[
+--[[Rui:
 input is a tuple of:
-1. torch.Tensor of size NxK (K is dim of image code; N is the batchSize)
-2. torch.LongTensor of size DxN, elements 1..M
+1. imgs: torch.Tensor of size frame_size * N x K (K is dim of image code; N is the batchSize)
+2. seq: torch.LongTensor of size DxN, elements 1..M
    where M = opt.vocab_size and D = opt.seq_length
 
 returns a (D+2)xNx(M+1) Tensor giving (normalized) log probabilities for the 
@@ -308,7 +309,7 @@ function layer:updateOutput(input)
 
   assert(seq:size(1) == self.seq_length)
   local batch_size = seq:size(2)
-  self.output:resize(self.seq_length+2, batch_size, self.vocab_size+1)
+  self.output:resize(self.seq_length+1+opt.frame_length, batch_size, self.vocab_size+1)
   
   self:_createInitState(batch_size)
 
@@ -316,22 +317,26 @@ function layer:updateOutput(input)
   self.inputs = {}
   self.lookup_tables_inputs = {}
   self.tmax = 0 -- we will keep track of max sequence length encountered in the data for efficiency
-  for t=1,self.seq_length+2 do
+  for t=1,self.seq_length+1+opt.frame_length do
 
     local can_skip = false
-    local xt
-    if t == 1 then
+    -- local xt
+    local wt, iwt, imt
+    if t <= opt.frame_length then
       -- feed in the images
-      xt = imgs -- NxK sized input
-    elseif t == 2 then
+      imt = imgs[t] -- NxK sized input
+      wt = torch.zeros(batch_size, opt.input_word_encoding_size)
+    elseif t == opt.frame_length + 1 then
       -- feed in the start tokens
-      local it = torch.LongTensor(batch_size):fill(self.vocab_size+1)
-      self.lookup_tables_inputs[t] = it
-      xt = self.lookup_tables[t]:forward(it) -- NxK sized input (token embedding vectors)
+      local iwt = torch.LongTensor(batch_size):fill(self.vocab_size+1)
+      self.lookup_tables_inputs[t] = iwt
+      wt = self.lookup_tables[t]:forward(iwt) -- NxK sized input (token embedding vectors)
+      imt = torch.zeros(batch_size, opt.input_image_encoding_size)
     else
+      imt = torch.zeros(batch_size, opt.input_image_encoding_size)
       -- feed in the rest of the sequence...
-      local it = seq[t-2]:clone()
-      if torch.sum(it) == 0 then
+      local iwt = seq[t-opt.frame_length-1]:clone()
+      if torch.sum(iwt) == 0 then
         -- computational shortcut for efficiency. All sequences have already terminated and only
         -- contain null tokens from here on. We can skip the rest of the forward pass and save time
         can_skip = true 
@@ -343,17 +348,17 @@ function layer:updateOutput(input)
         because we will carefully set the loss to zero at these places
         in the criterion, so computation based on this value will be noop for the optimization.
       --]]
-      it[torch.eq(it,0)] = 1
+      iwt[torch.eq(iwt,0)] = 1
 
       if not can_skip then
-        self.lookup_tables_inputs[t] = it
-        xt = self.lookup_tables[t]:forward(it)
+        self.lookup_tables_inputs[t] = iwt
+        wt = self.lookup_tables[t]:forward(iwt)
       end
     end
 
     if not can_skip then
       -- construct the inputs
-      self.inputs[t] = {xt,unpack(self.state[t-1])}
+      self.inputs[t] = {imt,unpack(self.state[t-1]),wt}
       -- forward the network
       local out = self.clones[t]:forward(self.inputs[t])
       -- process the outputs
@@ -366,6 +371,7 @@ function layer:updateOutput(input)
 
   return self.output
 end
+
 
 --[[
 gradOutput is an (D+2)xNx(M+1) Tensor.
