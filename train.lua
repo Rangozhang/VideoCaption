@@ -182,12 +182,15 @@ local function eval_split(split, evalopt)
   while true do
 
     -- fetch a batch of data
-    local data = loader:getBatch{batch_size = opt.batch_size, split = split, seq_per_img = opt.seq_per_img}
+    local data = loader:getBatch{batch_size = opt.batch_size, split = split, seq_per_img = opt.seq_per_img, frame_length = opt.frame_length}
     data.images = net_utils.prepro(data.images, false, opt.gpuid >= 0) -- preprocess in place, and don't augment
     n = n + data.images:size(1)
 
     -- forward the model to get loss
-    local feats = protos.cnn:forward(data.images)
+    local feats = torch.zeros(opt.frame_length, opt.batch_size, opt.input_image_encoding_size)
+    for t = 1, opt.frame_length do
+      feats[t] = protos.cnn:forward(data.images[t])
+    end
     local expanded_feats = protos.expander:forward(feats)
     local logprobs = protos.lm:forward{expanded_feats, data.labels}
     local loss = protos.crit:forward(logprobs, data.labels)
@@ -241,7 +244,7 @@ local function lossFun()
   -- Forward pass
   -----------------------------------------------------------------------------
   -- get batch of data  
-  local data = loader:getBatch{batch_size = opt.batch_size, split = 'train', seq_per_img = opt.seq_per_img}
+  local data = loader:getBatch{batch_size = opt.batch_size, split = 'train', seq_per_img = opt.seq_per_img, frame_length = opt.frame_length}
   data.images = net_utils.prepro(data.images, true, opt.gpuid >= 0) -- preprocess in place, do data augmentation
   -- data.images: opt.frame_lengthxNx3x224x224 
   -- data.seq: LxM where L is sequence length upper bound, and M = N*seq_per_img
@@ -266,11 +269,13 @@ local function lossFun()
   -- backprop criterion
   local dlogprobs = protos.crit:backward(logprobs, data.labels)
   -- backprop language model
-  local dexpanded_feats = unpack(protos.lm:backward({expanded_feats, data.labels}, dlogprobs))
+  local dexpanded_feats = protos.lm:backward({expanded_feats, data.labels}, dlogprobs)
   -- backprop the CNN, but only if we are finetuning
   if opt.finetune_cnn_after >= 0 and iter >= opt.finetune_cnn_after then
-    local dfeats = protos.expander:backward(feats, dexpanded_feats)
-    local dx = protos.cnn:backward(data.images, dfeats)
+      for t = 1, opt.frame_length do
+        local dfeats = protos.expander:backward(feats[t], dexpanded_feats[t])
+        local dx = protos.cnn:backward(data.images[t], dfeats)
+      end 
   end
 
   -- clip gradients
