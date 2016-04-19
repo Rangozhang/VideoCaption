@@ -1,13 +1,13 @@
 require 'misc.DataLoader'
 
-local loader = DataLoader{h5_file = '', json_file = '', frame_length = 10}
-
-print(loader:getSeqLength())
-
-print(loader:getVocabSize())
-
-print(loader:getVocab())
-
-print(loader:getBatch{batch_size = 16, split = 'train', seq_per_img = 5})
-
+local loader = DataLoader{h5_file = 'data.h5', json_file = 'data.json', frame_length = 10}
+print('init Dataloader done....\n\n\n')
+--print(loader:getSeqLength())
+print('get seqlength done....\n\n\n')
+--print(loader:getVocabSize())
+print('get Vocal Size done...\n\n\n')
+--print(loader:getVocab())
+print('get whole Vocab done...\n\n\n')
+print(loader:getBatch{batch_size = 16, split = 'train', seq_per_img = 5, frames_per_video = 10})
+print('get  Batch done....finally......\n\n\n')
 print(loader:resetIterator('train'))

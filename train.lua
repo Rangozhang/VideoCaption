@@ -1,4 +1,3 @@
-
 require 'torch'
 require 'nn'
 require 'nngraph'
@@ -118,13 +117,13 @@ else
   lmOpt.word_input_layer = opt.word_input_layer
   lmOpt.dropout = opt.drop_prob_lm
   lmOpt.seq_length = loader:getSeqLength()
-  lmOpt.batch_size = opt.batch_size * opt.seq_per_img
+  lmOpt.batch_size = opt.batch_size * opt.seq_per_img -- not used
   protos.lm = nn.LanguageModel(lmOpt)
   -- initialize the ConvNet
   local cnn_backend = opt.backend
   if opt.gpuid == -1 then cnn_backend = 'nn' end -- override to nn if gpu is disabled
   local cnn_raw = loadcaffe.load(opt.cnn_proto, opt.cnn_model, cnn_backend)
-  protos.cnn = net_utils.build_cnn(cnn_raw, {encoding_size = opt.input_encoding_size, backend = cnn_backend})
+  protos.cnn = net_utils.build_cnn(cnn_raw, {encoding_size = opt.input.input_image_encoding_size, backend = cnn_backend})
   -- initialize a special FeatExpander module that "corrects" for the batch number discrepancy 
   -- where we have multiple captions per one image in a batch. This is done for efficiency
   -- because doing a CNN forward pass is expensive. We expand out the CNN features for each sentence

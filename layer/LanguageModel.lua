@@ -126,14 +126,14 @@ function layer:sample(imgs, opt)
     if t <= self.frame_length then
       -- feed in the images
       imt = imgs[t]
-      wt = torch.zeros(batch_size, opt.input_word_encoding_size)
+      wt = torch.zeros(batch_size, self.input_word_encoding_size)
     elseif t == self.frame_length + 1 then
       -- feed in the start tokens
       iwt = torch.LongTensor(batch_size):fill(self.vocab_size+1)
       wt = self.lookup_table:forward(iwt)
-      imt = torch.zeros(batch_size, opt.input_image_encoding_size)
+      imt = torch.zeros(batch_size, self.input_image_encoding_size)
     else
-      imt = torch.zeros(batch_size, opt.input_image_encoding_size)
+      imt = torch.zeros(batch_size, self.input_image_encoding_size)
       -- take predictions from previous time step and feed them in
       if sample_max == 1 then
         -- use argmax "sampling"
@@ -331,15 +331,15 @@ function layer:updateOutput(input)
     if t <= self.frame_length then
       -- feed in the images
       imt = imgs[t] -- NxK sized input
-      wt = torch.zeros(batch_size, opt.input_word_encoding_size)
+      wt = torch.zeros(batch_size, self.input_word_encoding_size)
     elseif t == self.frame_length + 1 then
       -- feed in the start tokens
       local iwt = torch.LongTensor(batch_size):fill(self.vocab_size+1)
       self.lookup_tables_inputs[t] = iwt
       wt = self.lookup_tables[t]:forward(iwt) -- NxK sized input (token embedding vectors)
-      imt = torch.zeros(batch_size, opt.input_image_encoding_size)
+      imt = torch.zeros(batch_size, self.input_image_encoding_size)
     else
-      imt = torch.zeros(batch_size, opt.input_image_encoding_size)
+      imt = torch.zeros(batch_size, self.input_image_encoding_size)
       -- feed in the rest of the sequence...
       local iwt = seq[t-self.frame_length-1]:clone()
       if torch.sum(iwt) == 0 then
@@ -383,7 +383,8 @@ end
 gradOutput is an (D+2)xNx(M+1) Tensor.
 --]]
 function layer:updateGradInput(input, gradOutput)
-  local dimgs -- grad on input images
+  local dimgs = {} -- grad on input images
+  --local dwords   -- we don't need the gradient w.r.t. word input
 
   -- go backwards and lets compute gradients
   local dstate = {[self.tmax] = self.init_state} -- this works when init_state is all zeros
@@ -394,21 +395,24 @@ function layer:updateGradInput(input, gradOutput)
     table.insert(dout, gradOutput[t])
     local dinputs = self.clones[t]:backward(self.inputs[t], dout)
     -- split the gradient to xt and to state
-    local dxt = dinputs[1] -- first element is the input vector
+    -- dinputs[1] is dimt and dinputs[#dinputs] is dwt(d_word)
+    local dimg = dinputs[1] -- first element is the input vector
+    --dwords = dinputs[self.num_state+2]
     dstate[t-1] = {} -- copy over rest to state grad
     for k=2,self.num_state+1 do table.insert(dstate[t-1], dinputs[k]) end
     
-    -- continue backprop of xt
-    if t == 1 then
-      dimgs = dxt
+    if t <= self.frame_length then
+      dimgs[t] = dimg
     else
       local it = self.lookup_tables_inputs[t]
       self.lookup_tables[t]:backward(it, dxt) -- backprop into lookup table
     end
   end
 
-  -- we have gradient on image, but for LongTensor gt sequence we only create an empty tensor - can't backprop
-  self.gradInput = {dimgs, torch.Tensor()}
+  -- here only the d w.r.t. imags get propagated back
+  self.gradInput = dimgs 
+  --{dimgs, torch.Tensor()} we have gradient on image, but for LongTensor gt sequence we only create an empty tensor - can't backprop
+
   return self.gradInput
 end
 
@@ -455,7 +459,7 @@ function crit:updateOutput(input, seq)
   for b=1,N do -- iterate over batches
     local first_time = true
 
-    for t=self.frame_length+1,L do -- iterate over sequence time (ignore t=1:opt.frame_legnth, dummy forward for the frames)
+    for t=self.frame_length+1,L do -- iterate over sequence time (ignore t=1:self.frame_legnth, dummy forward for the frames)
       -- fetch the index of the next token in the sequence
       local target_index
       if t-self.frame_length > D then -- we are out of bounds of the index sequence: pad with null tokens
@@ -472,8 +476,8 @@ function crit:updateOutput(input, seq)
       -- if there is a non-null next token, enforce loss!
       if target_index ~= 0 then
         -- accumulate loss
-        loss = loss - input[{t,b,target_index}] -- log(p)
-        self.gradInput[{ t,b,target_index }] = -1  --?
+        loss = loss - input[{t,b,target_index}] -- log(p) since the last layer in LSTM is LogSoftmax
+        self.gradInput[{ t,b,target_index }] = -1  
         n = n + 1
       end
     end

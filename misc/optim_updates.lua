@@ -10,8 +10,7 @@ function sgdm(x, dx, lr, alpha, state)
   if not state.v then
     state.v = x.new(#x):zero()
   end
-  state.v:mul(alpha)
-  state.v:add(lr, dx)
+  state.v:mul(alpha):add(lr, dx)
   x:add(-1, state.v)
 end
 
