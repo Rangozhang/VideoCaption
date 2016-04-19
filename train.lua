@@ -243,12 +243,17 @@ local function lossFun()
   -- get batch of data  
   local data = loader:getBatch{batch_size = opt.batch_size, split = 'train', seq_per_img = opt.seq_per_img}
   data.images = net_utils.prepro(data.images, true, opt.gpuid >= 0) -- preprocess in place, do data augmentation
-  -- data.images: opt.frame_length*Nx3x224x224 
+  -- data.images: opt.frame_lengthxNx3x224x224 
   -- data.seq: LxM where L is sequence length upper bound, and M = N*seq_per_img
+  -- Which means that there are the real batch size is batch_size x seq_per_img
 
-  -- forward the ConvNet on images (most work happens here)
-  local feats = protos.cnn:forward(data.images)
+  -- forward the ConvNet on images
+  local feats = torch.zeros(opt.frame_length, batch_size, opt.input_image_encoding_size)
+  for t = 1, opt.frame_length do
+    feats[t] = protos.cnn:forward(data.images[t])
+  end
   -- we have to expand out image features, once for each sentence
+  -- extned the feats in the batch_size dim
   local expanded_feats = protos.expander:forward(feats)
   -- forward the language model
   local logprobs = protos.lm:forward{expanded_feats, data.labels}
@@ -261,7 +266,7 @@ local function lossFun()
   -- backprop criterion
   local dlogprobs = protos.crit:backward(logprobs, data.labels)
   -- backprop language model
-  local dexpanded_feats, ddummy = unpack(protos.lm:backward({expanded_feats, data.labels}, dlogprobs))
+  local dexpanded_feats = unpack(protos.lm:backward({expanded_feats, data.labels}, dlogprobs))
   -- backprop the CNN, but only if we are finetuning
   if opt.finetune_cnn_after >= 0 and iter >= opt.finetune_cnn_after then
     local dfeats = protos.expander:backward(feats, dexpanded_feats)

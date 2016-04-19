@@ -300,7 +300,7 @@ end
 
 --[[Rui:
 input is a tuple of:
-1. imgs: torch.Tensor of size frame_size * N x K (K is dim of image code; N is the batchSize)
+1. imgs: torch.Tensor of size frame_length x N x K (K is dim of image code; N is the batchSize)
 2. seq: torch.LongTensor of size DxN, elements 1..M
    where M = opt.vocab_size and D = opt.seq_length
 
