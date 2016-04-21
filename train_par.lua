@@ -10,6 +10,8 @@ require 'layer.LanguageModel'
 local net_utils = require 'misc.net_utils'
 require 'misc.optim_updates'
 require 'optim'
+local Threads = require 'threads'
+Threads.serialization('threads.sharedserialize')
 
 -------------------------------------------------------------------------------
 -- Input arguments and options
@@ -26,6 +28,7 @@ cmd:option('-input_json','full_test_data.json','path to the json file containing
 cmd:option('-cnn_proto','pretrained_model/VGG_ILSVRC_16_layers_deploy.prototxt','path to CNN prototxt file in Caffe format. Note this MUST be a VGGNet-16 right now.')
 cmd:option('-cnn_model','pretrained_model/VGG_ILSVRC_16_layers.caffemodel','path to CNN model file containing the weights, Caffe format. Note this MUST be a VGGNet-16 right now.')
 cmd:option('-start_from', '', 'path to a model checkpoint to initialize model weights from. Empty = don\'t')
+cmd:option('-nDonkeys', 1, 'How many donkeys are there to fetch data')
 
 -- Model settings
 cmd:option('-rnn_size',512,'size of the rnn in number of hidden nodes in each layer')
@@ -35,7 +38,8 @@ cmd:option('-word_input_layer',2, 'before which layer of LSTMs do we input the w
 cmd:option('-num_layers', 2, 'number of layers of LSTM')
 
 -- Optimization: General
-cmd:option('-max_iters', -1, 'max number of iterations to run for (-1 = run forever)')
+cmd:option('-epoch_size', 2500, 'How big is an epoch, followed by a evaluation and saving strategy')
+cmd:option('-max_epoch', 10, 'How many epoch to perform')
 cmd:option('-batch_size',32,'what is the batch size in number of images per batch? (there will be x seq_per_img sentences)')
 cmd:option('-grad_clip',0.1,'clip gradients at this value (note should be lower than usual 5 because we normalize grads by both batch and seq_length)')
 cmd:option('-drop_prob_lm', 0.5, 'strength of dropout in the Language Model RNN')
@@ -45,7 +49,7 @@ cmd:option('-frame_length', 10, 'number of consecutive frames processed for each
 -- Optimization: for the Language Model
 cmd:option('-optim','adam','what update to use? rmsprop|sgd|sgdmom|adagrad|adam')
 cmd:option('-learning_rate',4e-4,'learning rate')
-cmd:option('-learning_rate_decay_start', 10000, 'at what iteration to start decaying learning rate? (-1 = dont)')
+cmd:option('-learning_rate_decay_start', -1, 'at what iteration to start decaying learning rate? (-1 = dont)')
 cmd:option('-learning_rate_decay_every', 50000, 'every how many iterations thereafter to drop LR by half?')
 cmd:option('-optim_alpha',0.8,'alpha for adagrad/rmsprop/momentum/adam')
 cmd:option('-optim_beta',0.999,'beta used for adam')
@@ -59,7 +63,6 @@ cmd:option('-cnn_weight_decay', 0, 'L2 weight decay just for the CNN')
 
 -- Evaluation/Checkpointing
 cmd:option('-val_images_use', 3200, 'how many images to use when periodically evaluating the validation loss? (-1 = all)')
-cmd:option('-save_checkpoint_every', 2500, 'how often to save a model checkpoint?')
 cmd:option('-checkpoint_path', 'checkpoint', 'folder to save checkpoints into (empty = this folder)')
 cmd:option('-language_eval', 0, 'Evaluate language as well (1 = yes, 0 = no)? BLEU/CIDEr/METEOR/ROUGE_L? requires coco-caption code from Github.')
 cmd:option('-losses_log_every', 25, 'How often do we snapshot losses, for inclusion in the progress dump? (0 = disable)')
@@ -68,7 +71,7 @@ cmd:option('-losses_log_every', 25, 'How often do we snapshot losses, for inclus
 cmd:option('-backend', 'cudnn', 'nn|cudnn')
 cmd:option('-id', '', 'an id identifying this run/job. used in cross-val and appended when writing progress files')
 cmd:option('-seed', 123, 'random number generator seed to use')
-cmd:option('-gpuid', 0, 'which gpu to use. -1 = use CPU')
+cmd:option('-gpuid', 1, 'which gpu to use. -1 = use CPU')
 
 cmd:text()
 
@@ -91,10 +94,55 @@ if opt.gpuid >= 0 then
   cutorch.setDevice(opt.gpuid + 1) -- note +1 because lua is 1-indexed
 end
 
--------------------------------------------------------------------------------
--- Create the Data Loader instance
--------------------------------------------------------------------------------
 local loader = DataLoader{h5_file = opt.input_h5, json_file = opt.input_json, frame_length = opt.frame_length}
+
+-- prepare several little donkeys
+dk_mtx = Threads.Mutex()
+dk_cond = Threads.Condition()
+
+do
+local options = opt
+local mtx_id = dk_mtx:id()
+local cond_id = dk_cond:id()
+donkeys = Threads(
+    opt.nDonkeys,
+    function()
+       require 'misc.DataLoader'
+       require 'torch'
+    end,
+    function(idx)
+        Threads = require 'threads'
+        opt = options
+        dk_mtx_id = mtx_id
+        dk_cond_id = cond_id
+        local dk_cond = Threads.Condition(dk_cond_id)
+        local dk_mtx = Threads.Mutex(dk_mtx_id)
+        tid = idx
+        local seed = opt.seed + idx
+        torch.manualSeed(seed)
+        print(string.format('before locking: %d', tid))
+        dk_mtx:lock()
+        --[[
+        if idx ~= 1 then
+            dk_cond:wait(dk_mtx)
+            print(string.format('finish waiting: %d', tid))
+        end
+        --]]
+        print(string.format('Starting donkey with id: %d seed: %d', tid, seed))
+        donkeyloader = DataLoader{h5_file = opt.input_h5, json_file = opt.input_json, frame_length = opt.frame_length}
+        dk_mtx:unlock()
+        --dk_cond:signal()
+        print(string.format('after signaling: %d', tid))
+    end
+)
+end
+
+dk_mtx:free()
+dk_cond:free()
+print("Finishing")
+--io.read()
+
+collectgarbage()
 
 -------------------------------------------------------------------------------
 -- Initialize the networks
@@ -236,11 +284,21 @@ local function eval_split(split, evalopt)
   return loss_sum/loss_evals, predictions, lang_stats
 end
 
+local iter = 0
+local loss0
+local optim_state = {}
+local cnn_optim_state = {}
+local loss_history = {}
+local val_lang_stats_history = {}
+local val_loss_history = {}
+local best_score
+local epoch = 0
+local timer = torch.Timer()
+
 -------------------------------------------------------------------------------
 -- Loss function
 -------------------------------------------------------------------------------
-local iter = 0
-local function lossFun()
+local function lossFun(data)
   protos.cnn:training()
   protos.lm:training()
   grad_params:zero()
@@ -252,11 +310,7 @@ local function lossFun()
   -- Forward pass
   -----------------------------------------------------------------------------
   -- get batch of data  
-  local timer = torch.Timer()
-  local data = loader:getBatch{batch_size = opt.batch_size, split = 'train', seq_per_img = opt.seq_per_img, frame_length = opt.frame_length}
-  local loading_time = timer:time().real
-  timer:reset()
-  
+  -- local data = loader:getBatch{batch_size = opt.batch_size, split = 'train', seq_per_img = opt.seq_per_img, frame_length = opt.frame_length}
   data.images = net_utils.prepro(data.images, true, opt.gpuid >= 0) -- preprocess in place, do data augmentation
   -- data.images: opt.frame_lengthxNx3x224x224 
   -- data.seq: LxM where L is sequence length upper bound, and M = N*seq_per_img
@@ -302,38 +356,94 @@ local function lossFun()
   end
   -----------------------------------------------------------------------------
 
-  local fbwrd_time = timer:time().real
-
   -- and lets get out!
   local losses = { total_loss = loss }
-  return losses, loading_time, fbwrd_time
+  return losses
 end
 
--------------------------------------------------------------------------------
--- Main loop
--------------------------------------------------------------------------------
-local loss0
-local optim_state = {}
-local cnn_optim_state = {}
-local loss_history = {}
-local val_lang_stats_history = {}
-local val_loss_history = {}
-local best_score
-while true do  
-
+local function trainBatch(data)
   -- eval loss/gradient
-  local losses, ltime, fbtime
-  losses, ltime, fbtime = lossFun()
+  local losses = lossFun(data)
   if iter % opt.losses_log_every == 0 then loss_history[iter] = losses.total_loss end
   trainLogger:add{['Loss'] = losses.total_loss}
   trainLogger:style{'-'}
   trainLogger.showPlot = false
   trainLogger:plot()
   os.execute('convert -density 200 train.log.eps train.png')
-  print(string.format('iter %d: %.5f  loading time: %.2f forward/backward time: %.2f', iter, losses.total_loss, ltime, fbtime))
+  print(string.format('iter %d: %f, time %.2f', iter, losses.total_loss, timer:time().real))
+  timer:reset()
 
-  -- save checkpoint once in a while (or on final iteration)
-  if (iter % opt.save_checkpoint_every == 0 or iter == opt.max_iters) then
+
+  -- decay the learning rate for both LM and CNN
+  local learning_rate = opt.learning_rate
+  local cnn_learning_rate = opt.cnn_learning_rate
+  if iter > opt.learning_rate_decay_start and opt.learning_rate_decay_start >= 0 then
+    local frac = (iter - opt.learning_rate_decay_start) / opt.learning_rate_decay_every
+    local decay_factor = math.pow(0.5, frac)
+    learning_rate = learning_rate * decay_factor -- set the decayed rate
+    cnn_learning_rate = cnn_learning_rate * decay_factor
+  end
+
+  -- perform a parameter update
+  if opt.optim == 'rmsprop' then
+    rmsprop(params, grad_params, learning_rate, opt.optim_alpha, opt.optim_epsilon, optim_state)
+  elseif opt.optim == 'adagrad' then
+    adagrad(params, grad_params, learning_rate, opt.optim_epsilon, optim_state)
+  elseif opt.optim == 'sgd' then
+    sgd(params, grad_params, opt.learning_rate)
+  elseif opt.optim == 'sgdm' then
+    sgdm(params, grad_params, learning_rate, opt.optim_alpha, optim_state)
+  elseif opt.optim == 'sgdmom' then
+    sgdmom(params, grad_params, learning_rate, opt.optim_alpha, optim_state)
+  elseif opt.optim == 'adam' then
+    adam(params, grad_params, learning_rate, opt.optim_alpha, opt.optim_beta, opt.optim_epsilon, optim_state)
+  else
+    error('bad option opt.optim')
+  end
+
+  -- do a cnn update (if finetuning, and if rnn above us is not warming up right now)
+  if opt.finetune_cnn_after >= 0 and iter >= opt.finetune_cnn_after then
+    if opt.cnn_optim == 'sgd' then
+      sgd(cnn_params, cnn_grad_params, cnn_learning_rate)
+    elseif opt.cnn_optim == 'sgdm' then
+      sgdm(cnn_params, cnn_grad_params, cnn_learning_rate, opt.cnn_optim_alpha, cnn_optim_state)
+    elseif opt.cnn_optim == 'adam' then
+      adam(cnn_params, cnn_grad_params, cnn_learning_rate, opt.cnn_optim_alpha, opt.cnn_optim_beta, opt.optim_epsilon, cnn_optim_state)
+    else
+      error('bad option for opt.cnn_optim')
+    end
+  end
+
+  -- stopping criterions
+  iter = iter + 1
+  if iter % 10 == 0 then collectgarbage() end -- good idea to do this once in a while, i think
+  if loss0 == nil then loss0 = losses.total_loss end
+  if losses.total_loss > loss0 * 20 then
+    print('loss seems to be exploding, quitting.')
+    return
+  end
+
+end
+
+-------------------------------------------------------------------------------
+-- Main loop
+-------------------------------------------------------------------------------
+
+while epoch <= opt.max_epoch do  
+    epoch = epoch + 1
+    cutorch.synchronize()
+  
+    for i = 1, opt.epoch_size do
+        donkeys:addjob(
+            function()
+                return donkeyloader:getBatch{batch_size = opt.batch_size, split = 'train', 
+                                seq_per_img = opt.seq_per_img, frame_length = opt.frame_length}
+            end,
+            trainBatch
+        )
+    end
+    donkeys:synchronize()
+    cutorch.synchronize()
 
     -- evaluate the validation performance
     local val_loss, val_predictions, lang_stats = eval_split('val', {val_images_use = opt.val_images_use})
@@ -382,56 +492,4 @@ while true do
         print('wrote checkpoint to ' .. checkpoint_path .. '.t7')
       end
     end
-  end
-
-  -- decay the learning rate for both LM and CNN
-  local learning_rate = opt.learning_rate
-  local cnn_learning_rate = opt.cnn_learning_rate
-  if iter > opt.learning_rate_decay_start and opt.learning_rate_decay_start >= 0 then
-    local frac = (iter - opt.learning_rate_decay_start) / opt.learning_rate_decay_every
-    local decay_factor = math.pow(0.5, frac)
-    learning_rate = learning_rate * decay_factor -- set the decayed rate
-    cnn_learning_rate = cnn_learning_rate * decay_factor
-  end
-
-  -- perform a parameter update
-  if opt.optim == 'rmsprop' then
-    rmsprop(params, grad_params, learning_rate, opt.optim_alpha, opt.optim_epsilon, optim_state)
-  elseif opt.optim == 'adagrad' then
-    adagrad(params, grad_params, learning_rate, opt.optim_epsilon, optim_state)
-  elseif opt.optim == 'sgd' then
-    sgd(params, grad_params, opt.learning_rate)
-  elseif opt.optim == 'sgdm' then
-    sgdm(params, grad_params, learning_rate, opt.optim_alpha, optim_state)
-  elseif opt.optim == 'sgdmom' then
-    sgdmom(params, grad_params, learning_rate, opt.optim_alpha, optim_state)
-  elseif opt.optim == 'adam' then
-    adam(params, grad_params, learning_rate, opt.optim_alpha, opt.optim_beta, opt.optim_epsilon, optim_state)
-  else
-    error('bad option opt.optim')
-  end
-
-  -- do a cnn update (if finetuning, and if rnn above us is not warming up right now)
-  if opt.finetune_cnn_after >= 0 and iter >= opt.finetune_cnn_after then
-    if opt.cnn_optim == 'sgd' then
-      sgd(cnn_params, cnn_grad_params, cnn_learning_rate)
-    elseif opt.cnn_optim == 'sgdm' then
-      sgdm(cnn_params, cnn_grad_params, cnn_learning_rate, opt.cnn_optim_alpha, cnn_optim_state)
-    elseif opt.cnn_optim == 'adam' then
-      adam(cnn_params, cnn_grad_params, cnn_learning_rate, opt.cnn_optim_alpha, opt.cnn_optim_beta, opt.optim_epsilon, cnn_optim_state)
-    else
-      error('bad option for opt.cnn_optim')
-    end
-  end
-
-  -- stopping criterions
-  iter = iter + 1
-  if iter % 10 == 0 then collectgarbage() end -- good idea to do this once in a while, i think
-  if loss0 == nil then loss0 = losses.total_loss end
-  if losses.total_loss > loss0 * 20 then
-    print('loss seems to be exploding, quitting.')
-    break
-  end
-  if opt.max_iters > 0 and iter >= opt.max_iters then break end -- stopping criterion
-
 end

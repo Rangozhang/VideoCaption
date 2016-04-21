@@ -46,7 +46,7 @@ function net_utils.prepro(imgs, data_augment, on_gpu)
   assert(data_augment ~= nil, 'pass this in. careful here.')
   assert(on_gpu ~= nil, 'pass this in. careful here.')
 
-  local h,w = imgs:size(3), imgs:size(4)
+  local h,w = imgs:size(4), imgs:size(5)
   local cnn_input_size = 224
 
   -- cropping data augmentation, if needed
@@ -59,7 +59,7 @@ function net_utils.prepro(imgs, data_augment, on_gpu)
       xoff, yoff = math.ceil((w-cnn_input_size)/2), math.ceil((h-cnn_input_size)/2)
     end
     -- crop.
-    imgs = imgs[{ {}, {}, {yoff,yoff+cnn_input_size-1}, {xoff,xoff+cnn_input_size-1} }]
+    imgs = imgs[{{}, {}, {}, {yoff,yoff+cnn_input_size-1}, {xoff,xoff+cnn_input_size-1} }]
   end
 
   -- ship to gpu or convert from byte to float
@@ -67,7 +67,7 @@ function net_utils.prepro(imgs, data_augment, on_gpu)
 
   -- lazily instantiate vgg_mean
   if not net_utils.vgg_mean then
-    net_utils.vgg_mean = torch.FloatTensor{123.68, 116.779, 103.939}:view(1,3,1,1) -- in RGB order
+    net_utils.vgg_mean = torch.FloatTensor{123.68, 116.779, 103.939}:view(1,1,3,1,1) -- in RGB order
   end
   net_utils.vgg_mean = net_utils.vgg_mean:typeAs(imgs) -- a noop if the types match
 
@@ -199,9 +199,9 @@ function net_utils.language_eval(predictions, id)
   -- this is gross, but we have to call coco python code.
   -- Not my favorite kind of thing, but here we go
   local out_struct = {val_predictions = predictions}
-  utils.write_json('coco-caption/val' .. id .. '.json', out_struct) -- serialize to json (ew, so gross)
+  utils.write_json('caption/val' .. id .. '.json', out_struct) -- serialize to json (ew, so gross)
   os.execute('./misc/call_python_caption_eval.sh val' .. id .. '.json') -- i'm dying over here
-  local result_struct = utils.read_json('coco-caption/val' .. id .. '.json_out.json') -- god forgive me
+  local result_struct = utils.read_json('caption/val' .. id .. '.json_out.json') -- god forgive me
   return result_struct
 end
 

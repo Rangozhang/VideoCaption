@@ -19,11 +19,12 @@ function layer:__init(opt)
   self.rnn_size = utils.getopt(opt, 'rnn_size')
   self.num_layers = utils.getopt(opt, 'num_layers', 1)
   self.frame_length = utils.getopt(opt, 'frame_length', 10)
+  self.caption_size = utils.getopt(opt, 'caption_size', 0)
   local dropout = utils.getopt(opt, 'dropout', 0)
   -- options for Language Model
   self.seq_length = utils.getopt(opt, 'seq_length') -- WHAT IS THIS???
   -- create the core lstm network. note +1 for both the START and END tokens
-  self.core = LSTM.VC_lstm(self.input_word_encoding_size, self.vocab_size + 1, input_word_encoding_size, word_input_layer, self.rnn_size, self.num_layers, dropout)
+  self.core = LSTM.VC_lstm(self.input_image_encoding_size, self.vocab_size + 1, self.input_word_encoding_size, self.word_input_layer, self.rnn_size, self.num_layers, dropout)
   self.lookup_table = nn.LookupTable(self.vocab_size + 1, self.input_word_encoding_size) -- word to embedding???kil
   self:_createInitState(1) -- will be lazily resized later during forward passes
 end
@@ -50,7 +51,7 @@ function layer:createClones()
   print('constructing clones inside the LanguageModel')
   self.clones = {self.core}
   self.lookup_tables = {self.lookup_table}
-  for t=2,self.seq_length+self.frame_length do
+  for t=2,self.seq_length+self.frame_length+1 do
     self.clones[t] = self.core:clone('weight', 'bias', 'gradWeight', 'gradBias')
     self.lookup_tables[t] = self.lookup_table:clone('weight', 'gradWeight')
   end
@@ -126,14 +127,14 @@ function layer:sample(imgs, opt)
     if t <= self.frame_length then
       -- feed in the images
       imt = imgs[t]
-      wt = torch.zeros(batch_size, self.input_word_encoding_size)
+      wt = torch.zeros(batch_size, self.input_word_encoding_size):cuda()
     elseif t == self.frame_length + 1 then
       -- feed in the start tokens
       iwt = torch.LongTensor(batch_size):fill(self.vocab_size+1)
       wt = self.lookup_table:forward(iwt)
-      imt = torch.zeros(batch_size, self.input_image_encoding_size)
+      imt = torch.zeros(batch_size, self.input_image_encoding_size):cuda()
     else
-      imt = torch.zeros(batch_size, self.input_image_encoding_size)
+      imt = torch.zeros(batch_size, self.input_image_encoding_size):cuda()
       -- take predictions from previous time step and feed them in
       if sample_max == 1 then
         -- use argmax "sampling"
@@ -161,7 +162,8 @@ function layer:sample(imgs, opt)
     end
 
     assert(wt:size(2) == self.input_word_encoding_size, 'word_input:size(2) == self.input_word_encoding_size')
-    local inputs = {imt, unpack(state), wt}
+    local inputs = {imt, unpack(state)}
+    table.insert(inputs, wt)
     local out = self.core:forward(inputs)
     assert(self.num_state+1 == #out, 'self.num_state+1 == #out')
     logprobs = out[self.num_state+1] -- last element is the output vector
@@ -282,7 +284,8 @@ function layer:sample_beam(imgs, opt)
 
       if new_state then state = new_state end -- swap rnn state, if we reassinged beams
 
-      local inputs = {imt,unpack(state), wt}
+      local inputs = {imt,unpack(state)}
+      table.insert(inputs, wt)
       local out = self.core:forward(inputs)
       logprobs = out[self.num_state+1] -- last element is the output vector
       state = {}
@@ -331,15 +334,15 @@ function layer:updateOutput(input)
     if t <= self.frame_length then
       -- feed in the images
       imt = imgs[t] -- NxK sized input
-      wt = torch.zeros(batch_size, self.input_word_encoding_size)
+      wt = torch.zeros(batch_size, self.input_word_encoding_size):cuda()
     elseif t == self.frame_length + 1 then
       -- feed in the start tokens
       local iwt = torch.LongTensor(batch_size):fill(self.vocab_size+1)
       self.lookup_tables_inputs[t] = iwt
       wt = self.lookup_tables[t]:forward(iwt) -- NxK sized input (token embedding vectors)
-      imt = torch.zeros(batch_size, self.input_image_encoding_size)
+      imt = torch.zeros(batch_size, self.input_image_encoding_size):cuda()
     else
-      imt = torch.zeros(batch_size, self.input_image_encoding_size)
+      imt = torch.zeros(batch_size, self.input_image_encoding_size):cuda()
       -- feed in the rest of the sequence...
       local iwt = seq[t-self.frame_length-1]:clone()
       if torch.sum(iwt) == 0 then
@@ -364,7 +367,8 @@ function layer:updateOutput(input)
 
     if not can_skip then
       -- construct the inputs
-      self.inputs[t] = {imt,unpack(self.state[t-1]),wt}
+      self.inputs[t] = {imt,unpack(self.state[t-1])}
+      table.insert(self.inputs[t], wt)
       -- forward the network
       local out = self.clones[t]:forward(self.inputs[t])
       -- process the outputs
@@ -383,7 +387,7 @@ end
 gradOutput is an (D+2)xNx(M+1) Tensor.
 --]]
 function layer:updateGradInput(input, gradOutput)
-  local dimgs = {} -- grad on input images
+  local dimgs = torch.zeros(self.frame_length, self.caption_size, self.input_image_encoding_size):cuda() -- grad on input images
   --local dwords   -- we don't need the gradient w.r.t. word input
 
   -- go backwards and lets compute gradients
@@ -405,7 +409,7 @@ function layer:updateGradInput(input, gradOutput)
       dimgs[t] = dimg
     else
       local it = self.lookup_tables_inputs[t]
-      self.lookup_tables[t]:backward(it, dxt) -- backprop into lookup table
+      self.lookup_tables[t]:backward(it, dimg) -- backprop into lookup table
     end
   end
 
@@ -424,8 +428,9 @@ end
 -------------------------------------------------------------------------------
 
 local crit, parent = torch.class('nn.LanguageModelCriterion', 'nn.Criterion')
-function crit:__init()
+function crit:__init(frm_len)
   parent.__init(self)
+  self.frame_length = frm_len
 end
 
 --[[

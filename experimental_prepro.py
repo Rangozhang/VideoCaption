@@ -142,11 +142,11 @@ def encode_captions(imgs, params, wtoi):
     for j,s in enumerate(img['final_captions']):
       label_length[caption_counter] = min(max_length, len(s)) # record the length of this sequence
       if label_length[caption_counter] == 0:
-      	import pdb; pdb.set_trace()
-      caption_counter += 1
-      for k,w in enumerate(s):
-        if k < max_length:
-          Li[j,k] = wtoi[w]
+      	#import pdb; pdb.set_trace()
+        caption_counter += 1
+        for k,w in enumerate(s):
+            if k < max_length:
+                Li[j,k] = wtoi[w]
 
     # note: word indices are 1-indexed, and captions are padded with zeros
     label_arrays.append(Li)
@@ -193,31 +193,33 @@ def main(params):
   fix_length = 0
   sum_length = list()
   end_list = list()
+  dataset_name_list = list()
   for i, img in enumerate(imgs):
         DIR = os.path.join(params['images_root'], img['file_path']+'/')
         end_id = len([name for name in os.listdir(DIR) if os.path.isfile(os.path.join(DIR, name))])
         sum_length.append(end_id)
+        dataset_name_list.append("images/"+img['file_path']+'/')
         if end_id > fix_length:
             fix_length = end_id
             print('fix_length'+str(fix_length))
   mean_length = np.mean(sum_length)
-  dset = f.create_dataset("images", (N,3,256,256,round(mean_length)-1 ), dtype='uint8') # space for resized images
   print('average length ....is'+str(round(mean_length)))
+  json.dump(dataset_name_list, open('data_name_list.json','w'))
+  print('done!!!')
+  exit(0)
   for i,img in enumerate(imgs):
     # load the image SSSSSSSSSSSS
     DIR = os.path.join(params['images_root'], img['file_path']+'/')
     print(img['file_path'].split('_'))
     end_id = len([name for name in os.listdir(DIR) if os.path.isfile(os.path.join(DIR, name))])
     print end_id
+    dset = f.create_dataset("images/"+img['file_path'], (end_id, 3,256,256), dtype='uint8') # space for resized images
     start_id = 1
     holder_list = list()
     end_list.append(end_id)
-    for f_id in range(start_id, int(round(mean_length))):
+    for f_id in range(start_id, end_id):
 	tmp_file_name = "{}_{:06d}.jpg".format(img['file_path'], f_id+1)
-        if f_id < end_id:
-            I = imread(os.path.join(params['images_root'], img['file_path']+'/'+ tmp_file_name))
-        else:
-            I = np.zeros((256,256,3))
+        I = imread(os.path.join(params['images_root'], img['file_path']+'/'+ tmp_file_name))
         try:
             Ir = imresize(I, (256,256))
     	except:
@@ -230,9 +232,8 @@ def main(params):
    	# and swap order of axes from (256,256,3) to (3,256,256)
    	Ir = Ir.transpose(2,0,1)
 	# write to h5 holder
-	holder_list.append(Ir)
+        dset[f_id] = Ir
     #import pdb; pdb.set_trace()
-    dset[i] = np.stack(holder_list, axis = 3)
     if i % 10 == 0:
       print 'processing %d/%d (%.2f%% done)' % (i, N, i*100.0/N)
   f.close()
@@ -250,7 +251,7 @@ def main(params):
     if 'id' in img: jimg['id'] = img['id'] # copy over & mantain an id, if present (e.g. coco ids, useful)
 
     out['images'].append(jimg)
-  json.dump(end_list, open('end_list.json','w'))
+  json.dump(end_list, open('full_end_list.json','w'))
   json.dump(out, open(params['output_json'], 'w'))
   print 'wrote ', params['output_json']
 
@@ -261,8 +262,8 @@ if __name__ == "__main__":
   # input json
   parser.add_argument('--input_json', required=True, help='input json file to process into hdf5')
   parser.add_argument('--num_val', required=True, type=int, help='number of images to assign to validation data (for CV etc)')
-  parser.add_argument('--output_json', default='test_data.json', help='output json file')
-  parser.add_argument('--output_h5', default='test_data.h5', help='output h5 file')
+  parser.add_argument('--output_json', default='full_test_data.json', help='output json file')
+  parser.add_argument('--output_h5', default='full_test_data.h5', help='output h5 file')
 
   # options
   parser.add_argument('--max_length', default=16, type=int, help='max length of a caption, in number of words. captions longer than this get clipped.')

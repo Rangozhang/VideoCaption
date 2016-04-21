@@ -2,9 +2,11 @@ coco/
 coco-caption/
 model/
 .ipynb_checkpoints/
-vis/imgs/
-vis/vis.json
 testimages/
 checkpoints/
-data.h5
-test_data.h5
+*.h5
+*.json
+checkpoint/
+cv/
+pretrained_model/
+vis/

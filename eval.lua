@@ -7,7 +7,7 @@ require 'loadcaffe'
 local utils = require 'misc.utils'
 require 'misc.DataLoader'
 require 'misc.DataLoaderRaw'
-require 'misc.LanguageModel'
+require 'layer.LanguageModel'
 local net_utils = require 'misc.net_utils'
 
 -------------------------------------------------------------------------------
@@ -25,12 +25,12 @@ cmd:option('-model','','path to model to evaluate')
 cmd:option('-batch_size', 1, 'if > 0 then overrule, otherwise load from checkpoint.')
 cmd:option('-num_images', 100, 'how many images to use when periodically evaluating the loss? (-1 = all)')
 cmd:option('-language_eval', 0, 'Evaluate language as well (1 = yes, 0 = no)? BLEU/CIDEr/METEOR/ROUGE_L? requires coco-caption code from Github.')
-cmd:option('-dump_images', 1, 'Dump images into vis/imgs folder for vis? (1=yes,0=no)')
+cmd:option('-dump_images', 0, 'Dump images into vis/imgs folder for vis? (1=yes,0=no)')
 cmd:option('-dump_json', 1, 'Dump json with predictions into vis folder? (1=yes,0=no)')
 cmd:option('-dump_path', 0, 'Write image paths along with predictions into vis json? (1=yes,0=no)')
 -- Sampling options
 cmd:option('-sample_max', 1, '1 = sample argmax words. 0 = sample from distributions.')
-cmd:option('-beam_size', 2, 'used when sample_max = 1, indicates number of beams in beam search. Usually 2 or 3 works well. More is not better. Set this to 1 for faster runtime but a bit worse performance.')
+cmd:option('-beam_size', 1, 'used when sample_max = 1, indicates number of beams in beam search. Usually 2 or 3 works well. More is not better. Set this to 1 for faster runtime but a bit worse performance.')
 cmd:option('-temperature', 1.0, 'temperature when sampling from distributions (i.e. when sample_max = 0). Lower = "safer" predictions.')
 -- For evaluation on a folder of images:
 cmd:option('-image_folder', '', 'If this is nonempty then will predict on the images in this folder path')
@@ -71,9 +71,9 @@ local checkpoint = torch.load(opt.model)
 if string.len(opt.input_h5) == 0 then opt.input_h5 = checkpoint.opt.input_h5 end
 if string.len(opt.input_json) == 0 then opt.input_json = checkpoint.opt.input_json end
 if opt.batch_size == 0 then opt.batch_size = checkpoint.opt.batch_size end
-local fetch = {'rnn_size', 'input_encoding_size', 'drop_prob_lm', 'cnn_proto', 'cnn_model', 'seq_per_img'}
+local fetch = {'seq_per_img', 'frame_length'}
 for k,v in pairs(fetch) do 
-  opt[v] = checkpoint.opt[v] -- copy over options from model
+  opt[v] = checkpoint.opt[v] 
 end
 local vocab = checkpoint.vocab -- ix -> word mapping
 
@@ -82,7 +82,7 @@ local vocab = checkpoint.vocab -- ix -> word mapping
 -------------------------------------------------------------------------------
 local loader
 if string.len(opt.image_folder) == 0 then
-  loader = DataLoader{h5_file = opt.input_h5, json_file = opt.input_json}
+  loader = DataLoader{h5_file = opt.input_h5, json_file = opt.input_json, frame_length = opt.frame_length}
 else
   loader = DataLoaderRaw{folder_path = opt.image_folder, coco_json = opt.coco_json}
 end
@@ -113,12 +113,15 @@ local function eval_split(split, evalopt)
   while true do
 
     -- fetch a batch of data
-    local data = loader:getBatch{batch_size = opt.batch_size, split = split, seq_per_img = opt.seq_per_img}
+    local data = loader:getBatch{batch_size = opt.batch_size, split = split, seq_per_img = opt.seq_per_img, frame_length = opt.frame_length}
     data.images = net_utils.prepro(data.images, false, opt.gpuid >= 0) -- preprocess in place, and don't augment
     n = n + data.images:size(1)
 
     -- forward the model to get loss
-    local feats = protos.cnn:forward(data.images)
+    local feats = torch.zeros(opt.frame_length, opt.batch_size, opt.input_image_encoding_size):cuda()
+    for t = 1, opt.frame_length do
+        feats[t] = protos.cnn:forward(data.images[t])
+    end
 
     -- evaluate loss if we have the labels
     local loss = 0
@@ -135,7 +138,7 @@ local function eval_split(split, evalopt)
     local seq = protos.lm:sample(feats, sample_opts)
     local sents = net_utils.decode_sequence(vocab, seq)
     for k=1,#sents do
-      local entry = {image_id = data.infos[k].id, caption = sents[k]}
+      local entry = {image_id = data.infos[k].file_path, caption = sents[k]}
       if opt.dump_path == 1 then
         entry.file_name = data.infos[k].file_path
       end
