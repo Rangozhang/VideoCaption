@@ -45,8 +45,8 @@ cmd:option('-frame_length', 10, 'number of consecutive frames processed for each
 -- Optimization: for the Language Model
 cmd:option('-optim','adam','what update to use? rmsprop|sgd|sgdmom|adagrad|adam')
 cmd:option('-learning_rate',4e-4,'learning rate')
-cmd:option('-learning_rate_decay_start', 10000, 'at what iteration to start decaying learning rate? (-1 = dont)')
-cmd:option('-learning_rate_decay_every', 50000, 'every how many iterations thereafter to drop LR by half?')
+cmd:option('-learning_rate_decay_start', 2000, 'at what iteration to start decaying learning rate? (-1 = dont)')
+cmd:option('-learning_rate_decay_every', 5000, 'every how many iterations thereafter to drop LR by half?')
 cmd:option('-optim_alpha',0.8,'alpha for adagrad/rmsprop/momentum/adam')
 cmd:option('-optim_beta',0.999,'beta used for adam')
 cmd:option('-optim_epsilon',1e-8,'epsilon that goes into denominator for smoothing')
@@ -59,16 +59,16 @@ cmd:option('-cnn_weight_decay', 0, 'L2 weight decay just for the CNN')
 
 -- Evaluation/Checkpointing
 cmd:option('-val_images_use', 3200, 'how many images to use when periodically evaluating the validation loss? (-1 = all)')
-cmd:option('-save_checkpoint_every', 2500, 'how often to save a model checkpoint?')
+cmd:option('-save_checkpoint_every', 1000, 'how often to save a model checkpoint?')
 cmd:option('-checkpoint_path', 'checkpoint', 'folder to save checkpoints into (empty = this folder)')
-cmd:option('-language_eval', 0, 'Evaluate language as well (1 = yes, 0 = no)? BLEU/CIDEr/METEOR/ROUGE_L? requires coco-caption code from Github.')
+cmd:option('-language_eval', 1, 'Evaluate language as well (1 = yes, 0 = no)? BLEU/CIDEr/METEOR/ROUGE_L? requires coco-caption code from Github.')
 cmd:option('-losses_log_every', 25, 'How often do we snapshot losses, for inclusion in the progress dump? (0 = disable)')
 
 -- misc
 cmd:option('-backend', 'cudnn', 'nn|cudnn')
 cmd:option('-id', '', 'an id identifying this run/job. used in cross-val and appended when writing progress files')
 cmd:option('-seed', 123, 'random number generator seed to use')
-cmd:option('-gpuid', 0, 'which gpu to use. -1 = use CPU')
+cmd:option('-gpuid', 2, 'which gpu to use. -1 = use CPU')
 
 cmd:text()
 
@@ -109,7 +109,7 @@ if string.len(opt.start_from) > 0 then
   net_utils.unsanitize_gradients(protos.cnn)
   local lm_modules = protos.lm:getModulesList()
   for k,v in pairs(lm_modules) do net_utils.unsanitize_gradients(v) end
-  protos.crit = nn.LanguageModelCriterion() -- not in checkpoints, create manually
+  protos.crit = nn.LanguageModelCriterion(opt.frame_length) -- not in checkpoints, create manually
   protos.expander = nn.FeatExpander(opt.seq_per_img) -- not in checkpoints, create manually
 else
   -- create protos from scratch
@@ -220,7 +220,7 @@ local function eval_split(split, evalopt)
     local ix0 = data.bounds.it_pos_now
     local ix1 = math.min(data.bounds.it_max, val_images_use)
     if verbose then
-      print(string.format('evaluating validation performance... %d/%d (%f)', ix0-1, ix1, loss))
+      print(string.format('outputing validation set results... %d/%d (%f)', ix0-1, ix1, loss))
     end
 
     if loss_evals % 10 == 0 then collectgarbage() end
@@ -229,8 +229,9 @@ local function eval_split(split, evalopt)
   end
 
   local lang_stats
+  -- print('=============', #predictions)
   if opt.language_eval == 1 then
-    lang_stats = net_utils.language_eval(predictions, opt.id)
+    lang_stats = net_utils.language_eval(predictions, opt.id) -- predictions: # 224; 
   end
 
   return loss_sum/loss_evals, predictions, lang_stats
