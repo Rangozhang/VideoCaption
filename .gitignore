@@ -1,6 +1,4 @@
 coco/
-caption/
-coco-caption/
 model/
 .ipynb_checkpoints/
 testimages/

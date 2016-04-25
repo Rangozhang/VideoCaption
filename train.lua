@@ -68,7 +68,7 @@ cmd:option('-losses_log_every', 25, 'How often do we snapshot losses, for inclus
 cmd:option('-backend', 'cudnn', 'nn|cudnn')
 cmd:option('-id', '', 'an id identifying this run/job. used in cross-val and appended when writing progress files')
 cmd:option('-seed', 123, 'random number generator seed to use')
-cmd:option('-gpuid', 2, 'which gpu to use. -1 = use CPU')
+cmd:option('-gpuid', 0, 'which gpu to use. -1 = use CPU')
 
 cmd:text()
 
@@ -370,18 +370,18 @@ while true do
     end
     if best_score == nil or current_score > best_score then
       best_score = current_score
-      if iter > 0 then -- dont save on very first iteration
-        -- include the protos (which have weights) and save to file
-        local save_protos = {}
-        save_protos.lm = thin_lm -- these are shared clones, and point to correct param storage
-        save_protos.cnn = thin_cnn
-        checkpoint.protos = save_protos
-        -- also include the vocabulary mapping so that we can use the checkpoint 
-        -- alone to run on arbitrary images without the data loader
-        checkpoint.vocab = loader:getVocab()
-        torch.save(checkpoint_path .. '.t7', checkpoint)
-        print('wrote checkpoint to ' .. checkpoint_path .. '.t7')
-      end
+    end
+    if iter > 0 then -- dont save on very first iteration
+      -- include the protos (which have weights) and save to file
+      local save_protos = {}
+      save_protos.lm = thin_lm -- these are shared clones, and point to correct param storage
+      save_protos.cnn = thin_cnn
+      checkpoint.protos = save_protos
+      -- also include the vocabulary mapping so that we can use the checkpoint 
+      -- alone to run on arbitrary images without the data loader
+      checkpoint.vocab = loader:getVocab()
+      torch.save(checkpoint_path .. '_' .. current_score .. '.t7', checkpoint)
+      print('wrote checkpoint to ' .. checkpoint_path .. '.t7')
     end
   end
 
