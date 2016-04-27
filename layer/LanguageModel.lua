@@ -209,15 +209,23 @@ function layer:sample_beam(imgs, opt)
       local new_state
       if t <= self.frame_length then
         -- feed in the images
-	imt = imgs[t][k]:expand(beam_size, feat_dim) -- k'th image in the batch
-	wt = torch.zeros(beam_size, self.input_word_encoding_size)
+        imt = imgs[t][k]
+        if imgs[t][k]:nDimension() == 1 then
+            imt = imgs[t][k]:resize(1, imgs[t][k]:size(1))
+        end
+        imt = imt:expand(beam_size, feat_dim) -- k'th image in the batch
+        --print(imt)
+        --print(beam_size)
+        --print(feat_dim)
+        --io.read()
+        wt = torch.zeros(beam_size, self.input_word_encoding_size):cuda()
         --local imgk = imgs[{ {k,k} }]:expand(beam_size, feat_dim) -- k'th image feature expanded out
         --xt = imgk
       elseif t == self.frame_length+1 then
         -- feed in the start tokens
         iwt = torch.LongTensor(beam_size):fill(self.vocab_size+1)
         wt = self.lookup_table:forward(iwt)
-	imt = torch.zeros(beam_size, feat_dim)
+	    imt = torch.zeros(beam_size, feat_dim):cuda()
       else
         --[[
           perform a beam merge. that is,
@@ -230,7 +238,7 @@ function layer:sample_beam(imgs, opt)
         local candidates = {}
         local cols = math.min(beam_size,ys:size(2))
         local rows = beam_size
-        if t == 3 then rows = 1 end -- at first time step only the first beam is active
+        if t == self.frame_length + 2 then rows = 1 end -- at first time step only the first beam is active
         for c=1,cols do -- for each column (word, essentially)
           for q=1,rows do -- for each beam expansion
             -- compute logprob of expanding beam q with word in (sorted) position c
@@ -244,17 +252,17 @@ function layer:sample_beam(imgs, opt)
         -- construct new beams
         new_state = net_utils.clone_list(state)
         local beam_seq_prev, beam_seq_logprobs_prev
-        if t > 3 then
+        if t > self.frame_length + 2 then
           -- well need these as reference when we fork beams around
-          beam_seq_prev = beam_seq[{ {1,t-3}, {} }]:clone()
-          beam_seq_logprobs_prev = beam_seq_logprobs[{ {1,t-3}, {} }]:clone()
+          beam_seq_prev = beam_seq[{ {1,t-self.frame_length-2}, {} }]:clone()
+          beam_seq_logprobs_prev = beam_seq_logprobs[{ {1,t-self.frame_length-2}, {} }]:clone()
         end
         for vix=1,beam_size do
           local v = candidates[vix]
           -- fork beam index q into index vix
-          if t > 3 then
-            beam_seq[{ {1,t-3}, vix }] = beam_seq_prev[{ {}, v.q }]
-            beam_seq_logprobs[{ {1,t-3}, vix }] = beam_seq_logprobs_prev[{ {}, v.q }]
+          if t > self.frame_length+2 then
+            beam_seq[{ {1,t-self.frame_length-2}, vix }] = beam_seq_prev[{ {}, v.q }]
+            beam_seq_logprobs[{ {1,t-self.frame_length-2}, vix }] = beam_seq_logprobs_prev[{ {}, v.q }]
           end
           -- rearrange recurrent states
           for state_ix = 1,#new_state do
@@ -262,8 +270,8 @@ function layer:sample_beam(imgs, opt)
             new_state[state_ix][vix] = state[state_ix][v.q]
           end
           -- append new end terminal at the end of this beam
-          beam_seq[{ t-2, vix }] = v.c -- c'th word is the continuation
-          beam_seq_logprobs[{ t-2, vix }] = v.r -- the raw logprob here
+          beam_seq[{ t-self.frame_length-1, vix }] = v.c -- c'th word is the continuation
+          beam_seq_logprobs[{ t-self.frame_length-1, vix }] = v.r -- the raw logprob here
           beam_logprobs_sum[vix] = v.p -- the new (sum) logprob along this beam
 
           if v.c == self.vocab_size+1 or t == self.seq_length+2 then
@@ -277,9 +285,9 @@ function layer:sample_beam(imgs, opt)
         end
         
         -- encode as vectors
-        iwt = beam_seq[t-2]
+        iwt = beam_seq[t-self.frame_length-1]
         wt = self.lookup_table:forward(iwt)
-	imt = torch.zeros(beam_size, feat_dim)
+	imt = torch.zeros(beam_size, feat_dim):cuda()
       end
 
       if new_state then state = new_state end -- swap rnn state, if we reassinged beams

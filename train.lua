@@ -39,13 +39,13 @@ cmd:option('-max_iters', -1, 'max number of iterations to run for (-1 = run fore
 cmd:option('-batch_size',32,'what is the batch size in number of images per batch? (there will be x seq_per_img sentences)')
 cmd:option('-grad_clip',0.1,'clip gradients at this value (note should be lower than usual 5 because we normalize grads by both batch and seq_length)')
 cmd:option('-drop_prob_lm', 0.5, 'strength of dropout in the Language Model RNN')
-cmd:option('-finetune_cnn_after', 0, 'After what iteration do we start finetuning the CNN? (-1 = disable; never finetune, 0 = finetune from start)')
+cmd:option('-finetune_cnn_after', -1, 'After what iteration do we start finetuning the CNN? (-1 = disable; never finetune, 0 = finetune from start)')
 cmd:option('-seq_per_img',5,'number of captions to sample for each image during training. Done for efficiency since CNN forward pass is expensive. E.g. coco has 5 sents/image')
 cmd:option('-frame_length', 10, 'number of consecutive frames processed for each time')
 -- Optimization: for the Language Model
 cmd:option('-optim','adam','what update to use? rmsprop|sgd|sgdmom|adagrad|adam')
-cmd:option('-learning_rate',4e-4,'learning rate')
-cmd:option('-learning_rate_decay_start', 2000, 'at what iteration to start decaying learning rate? (-1 = dont)')
+cmd:option('-learning_rate',4e-5,'learning rate')
+cmd:option('-learning_rate_decay_start', 2001, 'at what iteration to start decaying learning rate? (-1 = dont)')
 cmd:option('-learning_rate_decay_every', 5000, 'every how many iterations thereafter to drop LR by half?')
 cmd:option('-optim_alpha',0.8,'alpha for adagrad/rmsprop/momentum/adam')
 cmd:option('-optim_beta',0.999,'beta used for adam')
@@ -388,7 +388,7 @@ while true do
   -- decay the learning rate for both LM and CNN
   local learning_rate = opt.learning_rate
   local cnn_learning_rate = opt.cnn_learning_rate
-  if iter > opt.learning_rate_decay_start and opt.learning_rate_decay_start >= 0 then
+  if iter%opt.learning_rate_decay_every == 0 and iter > opt.learning_rate_decay_start and opt.learning_rate_decay_start >= 1 then
     local frac = (iter - opt.learning_rate_decay_start) / opt.learning_rate_decay_every
     local decay_factor = math.pow(0.5, frac)
     learning_rate = learning_rate * decay_factor -- set the decayed rate

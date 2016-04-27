@@ -34,13 +34,14 @@ cmd:option('-input_word_encoding_size',256,'the encoding size of each token in t
 cmd:option('-word_input_layer',2, 'before which layer of LSTMs do we input the word embedding?')
 cmd:option('-num_layers', 2, 'number of layers of LSTM')
 cmd:option('-beam_size', 1, 'used when sample_max = 1, indicates number of beams in beam search. Usually 2 or 3 works well. More is not better. Set this to 1 for faster runtime but a bit worse performance.')
+cmd:option('-sample_max', 0, '')
 cmd:option('-temperature', 1.0, 'temperature when sampling from distributions (i.e. when sample_max = 0). Lower = "safer" predictions.')
-cmd:option('-image_folder', '', 'If this is nonempty then will predict on the images in this folder path')
+cmd:option('-image_folder', '', 'parent root for testing videos')
 cmd:option('-image_root', '', 'In case the image paths have to be preprended with a root path to an image folder')
 cmd:option('-input_h5','','path to the h5file containing the preprocessed dataset. empty = fetch from model checkpoint.')
 cmd:option('-input_json','','path to the json file containing additional info and vocab. empty = fetch from model checkpoint.')
 cmd:option('-split', 'test', 'if running on MSCOCO images, which split to use: val|test|train')
-cmd:option('-coco_json', '', 'if nonempty then use this file in DataLoaderRaw (see docs there). Used only in MSCOCO test evaluation, where we have a specific json file of only test set images.')
+cmd:option('-dir_prefix', 'the name of the testing directory')
 cmd:option('-backend', 'cudnn', 'nn|cudnn')
 cmd:option('-id', 'evalscript', 'an id identifying this run/job. used only if language_eval = 1 for appending to intermediate files')
 cmd:option('-seed', 123, 'random number generator seed to use')
@@ -51,6 +52,9 @@ cmd:text()
 -- Basic Torch initializations
 -------------------------------------------------------------------------------
 local opt = cmd:parse(arg)
+
+print('parsing finished')
+
 torch.manualSeed(opt.seed)
 torch.setdefaulttensortype('torch.FloatTensor') -- for CPU
 
@@ -77,6 +81,8 @@ for k,v in pairs(fetch) do
 end
 local vocab = checkpoint.vocab -- ix -> word mapping
 
+print "Creating DataLoader..."
+
 -------------------------------------------------------------------------------
 -- Create the Data Loader instance
 -------------------------------------------------------------------------------
@@ -84,7 +90,9 @@ local loader
 if string.len(opt.image_folder) == 0 then
   loader = DataLoader{h5_file = opt.input_h5, json_file = opt.input_json, frame_length = opt.frame_length}
 else
-  loader = DataLoaderRaw{folder_path = opt.image_folder, coco_json = opt.coco_json}
+  loader = DataLoaderRaw{folder_path = path.join(opt.image_folder, opt.dir_prefix), prefix = opt.dir_prefix}
+  opt.language_eval = 0
+  opt.batch_size = 1
 end
 
 -------------------------------------------------------------------------------
@@ -96,11 +104,13 @@ protos.crit = nn.LanguageModelCriterion(opt.frame_length)
 protos.lm:createClones() -- reconstruct clones inside the language model
 if opt.gpuid >= 0 then for k,v in pairs(protos) do v:cuda() end end
 
+print('Sampling...')
+
 -------------------------------------------------------------------------------
 -- Evaluation fun(ction)
 -------------------------------------------------------------------------------
 local function eval_split(split, evalopt)
-  local verbose = utils.getopt(evalopt, 'verbose', true)
+  local verbose = utils.getopt(evalopt, 'verbose', false)
   local num_images = utils.getopt(evalopt, 'num_images', true)
 
   protos.cnn:evaluate()
@@ -149,9 +159,7 @@ local function eval_split(split, evalopt)
         print(cmd)
         os.execute(cmd) -- dont think there is cleaner way in Lua
       end
-      if verbose then
-        print(string.format('image %s: %s', entry.image_id, entry.caption))
-      end
+      print(string.format('image %s: %s', entry.image_id, entry.caption))
     end
 
     -- if we wrapped around the split or used up val imgs budget then bail
@@ -173,13 +181,12 @@ local function eval_split(split, evalopt)
   return loss_sum/loss_evals, predictions, lang_stats
 end
 
+for t = 1, 10 do
 local loss, split_predictions, lang_stats = eval_split(opt.split, {num_images = opt.num_images})
-print('loss: ', loss)
+if loss then
+  print('loss: ', loss)
+end
 if lang_stats then
   print(lang_stats)
 end
-
-if opt.dump_json == 1 then
-  -- dump the json
-  utils.write_json('vis/vis.json', split_predictions)
 end
