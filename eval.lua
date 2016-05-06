@@ -22,7 +22,7 @@ cmd:text('Options')
 -- Input paths
 cmd:option('-model','','path to model to evaluate')
 -- Basic options
-cmd:option('-batch_size', 1, 'if > 0 then overrule, otherwise load from checkpoint.')
+cmd:option('-batch_size', 30, 'if > 0 then overrule, otherwise load from checkpoint.')
 cmd:option('-num_images', 100, 'how many images to use when periodically evaluating the loss? (-1 = all)')
 cmd:option('-language_eval', 1, 'Evaluate language as well (1 = yes, 0 = no)? BLEU/CIDEr/METEOR/ROUGE_L? requires coco-caption code from Github.')
 cmd:option('-dump_images', 0, 'Dump images into vis/imgs folder for vis? (1=yes,0=no)')
@@ -33,7 +33,7 @@ cmd:option('-input_image_encoding_size',512,'the encoding size of each frame of 
 cmd:option('-input_word_encoding_size',256,'the encoding size of each token in the vocabulary')
 cmd:option('-word_input_layer',2, 'before which layer of LSTMs do we input the word embedding?')
 cmd:option('-num_layers', 2, 'number of layers of LSTM')
-cmd:option('-beam_size', 1, 'used when sample_max = 1, indicates number of beams in beam search. Usually 2 or 3 works well. More is not better. Set this to 1 for faster runtime but a bit worse performance.')
+cmd:option('-beam_size', 3, 'used when sample_max = 1, indicates number of beams in beam search. Usually 2 or 3 works well. More is not better. Set this to 1 for faster runtime but a bit worse performance.')
 cmd:option('-sample_max', 0, '')
 cmd:option('-temperature', 1.0, 'temperature when sampling from distributions (i.e. when sample_max = 0). Lower = "safer" predictions.')
 cmd:option('-image_folder', '', 'parent root for testing videos')
@@ -45,7 +45,7 @@ cmd:option('-dir_prefix', 'the name of the testing directory')
 cmd:option('-backend', 'cudnn', 'nn|cudnn')
 cmd:option('-id', 'evalscript', 'an id identifying this run/job. used only if language_eval = 1 for appending to intermediate files')
 cmd:option('-seed', 123, 'random number generator seed to use')
-cmd:option('-gpuid', 0, 'which gpu to use. -1 = use CPU')
+cmd:option('-gpuid', 2, 'which gpu to use. -1 = use CPU')
 cmd:text()
 
 -------------------------------------------------------------------------------
@@ -181,7 +181,7 @@ local function eval_split(split, evalopt)
   return loss_sum/loss_evals, predictions, lang_stats
 end
 
-for t = 1, 10 do
+--for t = 1, 10 do
 local loss, split_predictions, lang_stats = eval_split(opt.split, {num_images = opt.num_images})
 if loss then
   print('loss: ', loss)
@@ -189,4 +189,4 @@ end
 if lang_stats then
   print(lang_stats)
 end
-end
+--end
